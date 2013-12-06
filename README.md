@@ -1,0 +1,1 @@
+prototype for creating an ipad video with logo overlay
