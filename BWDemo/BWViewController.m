@@ -67,8 +67,6 @@
 	} else {
 		_label.text = @"Movie saved.";
 		[self resetMoviePlayer];
-        
-        //should I combine them here?
 	}
 }
 
@@ -81,19 +79,23 @@
 	UIImagePickerController *cameraUI = [[UIImagePickerController alloc] init];
     
 	cameraUI.mediaTypes = [NSArray arrayWithObject:(NSString *)kUTTypeMovie];
-	
+
 	cameraUI.sourceType = UIImagePickerControllerSourceTypeCamera;
+
+   
+    if([UIImagePickerController isCameraDeviceAvailable: UIImagePickerControllerCameraDeviceFront] == YES){
+        cameraUI.cameraDevice= UIImagePickerControllerCameraDeviceFront;
+    }
+    
 	cameraUI.cameraCaptureMode = UIImagePickerControllerCameraCaptureModeVideo;
 	cameraUI.videoQuality = UIImagePickerControllerQualityTypeMedium;
-	
+	cameraUI.allowsEditing= YES;
 	cameraUI.delegate = delegate;
 	[controller presentViewController:cameraUI animated:YES completion:nil];
 	return YES;
 }
 
 - (void) imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary *)info {
-    
-    NSLog(@"didFinishPickingMediaWithInfo");
     
 	[self dismissViewControllerAnimated:YES completion:^{
         
@@ -102,9 +104,10 @@
 		_label.text = @"Have movie.";
 		
 		NSURL *movieURL = info[UIImagePickerControllerMediaURL];
+        
 		self.moviePath = [movieURL path];
-         self.videoAsset = [AVAsset assetWithURL:movieURL];
-        [self videoOutput];
+        self.videoAsset = [AVAsset assetWithURL:movieURL];
+        [self videoOutput:info];
 
 	}];
 }
@@ -117,7 +120,6 @@
 #pragma mark - MPMoviePlayerController notification callbacks
 
 - (void) moviePlaybackFinishedCallback: (NSNotification * ) notification {
-    NSLog(@"moviePlaybackFinishedCallback");
 	[self.moviePlayer prepareToPlay];
 }
 
@@ -132,7 +134,6 @@
 
 - (void)applyVideoEffectsToComposition:(AVMutableVideoComposition *)composition size:(CGSize)size
 {
-    NSLog(@"applyVideoEffectsToComposition");
 
     // 1 - set up the overlay
     CALayer *overlayLayer = [CALayer layer];
@@ -152,10 +153,12 @@
     // 3 - apply magic
     composition.animationTool = [AVVideoCompositionCoreAnimationTool
                                  videoCompositionCoreAnimationToolWithPostProcessingAsVideoLayer:videoLayer inLayer:parentLayer];
+ 
     
 }
-- (void)videoOutput
+- (void)videoOutput:(NSDictionary *)info
 {
+   
     // 1 - Early exit if there's no video file selected
     if (!self.videoAsset) {
         UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Error" message:@"Please Load a Video Asset First"
@@ -164,18 +167,31 @@
         return;
     }
     
+
+    CMTime start_time = kCMTimeZero;
+    CMTime duration = self.videoAsset.duration;
+    
     // 2 - Create AVMutableComposition object. This object will hold your AVMutableCompositionTrack instances.
     AVMutableComposition *mixComposition = [[AVMutableComposition alloc] init];
     
     // 3 - Video track
     AVMutableCompositionTrack *videoTrack = [mixComposition addMutableTrackWithMediaType:AVMediaTypeVideo
                                                                         preferredTrackID:kCMPersistentTrackID_Invalid];
-    [videoTrack insertTimeRange:CMTimeRangeMake(kCMTimeZero, self.videoAsset.duration)
+    [videoTrack insertTimeRange:CMTimeRangeMake(start_time, duration)
                         ofTrack:[[self.videoAsset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0]
-                         atTime:kCMTimeZero error:nil];
+                         atTime:start_time error:nil];
+    // add audio
+    AVMutableCompositionTrack *audioTrack= [mixComposition addMutableTrackWithMediaType:AVMediaTypeAudio
+                                                                       preferredTrackID:kCMPersistentTrackID_Invalid];
+    
+    [audioTrack insertTimeRange:CMTimeRangeMake(start_time, duration)
+                        ofTrack:[[self.videoAsset tracksWithMediaType:AVMediaTypeAudio] objectAtIndex:0]
+                         atTime:start_time error:nil];
     
     // 3.1 - Create AVMutableVideoCompositionInstruction
     AVMutableVideoCompositionInstruction *mainInstruction = [AVMutableVideoCompositionInstruction videoCompositionInstruction];
+    //mainInstruction.timeRange = CMTimeRangeMake(start_time, duration);
+    
     mainInstruction.timeRange = CMTimeRangeMake(kCMTimeZero, self.videoAsset.duration);
     
     // 3.2 - Create an AVMutableVideoCompositionLayerInstruction for the video track and fix the orientation.
@@ -183,6 +199,7 @@
     AVAssetTrack *videoAssetTrack = [[self.videoAsset tracksWithMediaType:AVMediaTypeVideo] objectAtIndex:0];
     UIImageOrientation videoAssetOrientation_  = UIImageOrientationUp;
     BOOL isVideoAssetPortrait_  = NO;
+    
     CGAffineTransform videoTransform = videoAssetTrack.preferredTransform;
     if (videoTransform.a == 0 && videoTransform.b == 1.0 && videoTransform.c == -1.0 && videoTransform.d == 0) {
         videoAssetOrientation_ = UIImageOrientationRight;
@@ -198,8 +215,9 @@
     if (videoTransform.a == -1.0 && videoTransform.b == 0 && videoTransform.c == 0 && videoTransform.d == -1.0) {
         videoAssetOrientation_ = UIImageOrientationDown;
     }
-    [videolayerInstruction setTransform:videoAssetTrack.preferredTransform atTime:kCMTimeZero];
-    [videolayerInstruction setOpacity:0.0 atTime:self.videoAsset.duration];
+    
+    [videolayerInstruction setTransform:videoAssetTrack.preferredTransform atTime:start_time];
+    [videolayerInstruction setOpacity:0.0 atTime:duration];
     
     // 3.3 - Add instructions
     mainInstruction.layerInstructions = [NSArray arrayWithObjects:videolayerInstruction,nil];
@@ -232,6 +250,9 @@
     // 5 - Create exporter
     AVAssetExportSession *exporter = [[AVAssetExportSession alloc] initWithAsset:mixComposition
                                                                       presetName:AVAssetExportPresetHighestQuality];
+    
+    CMTimeRange r= [self getTimeRangeFromInfo:info];
+    exporter.timeRange = r;
     exporter.outputURL=url;
     exporter.outputFileType = AVFileTypeQuickTimeMovie;
     exporter.shouldOptimizeForNetworkUse = YES;
@@ -243,10 +264,24 @@
     }];
 }
 
-
-- (void)exportDidFinish:(AVAssetExportSession*)session {
+- (CMTimeRange)getTimeRangeFromInfo:(NSDictionary *)info{
     
-    NSLog(@"exportDidFinish");
+    NSNumber *start = [info objectForKey:@"_UIImagePickerControllerVideoEditingStart"];
+    NSNumber *end = [info objectForKey:@"_UIImagePickerControllerVideoEditingEnd"];
+    
+    if(!start){
+        start = [NSNumber numberWithInt:0];
+    }
+    NSLog(@"getTimeRangeFromInfo");
+    NSLog(@"start: %@, end: %@", start, end);
+    
+    int startMilliseconds = ([start doubleValue] * 1000);
+    int endMilliseconds = ([end doubleValue] * 1000);
+    CMTimeRange timeRange = CMTimeRangeMake(CMTimeMake(startMilliseconds, 1000), CMTimeMake(endMilliseconds - startMilliseconds, 1000));
+    
+    return timeRange;
+}
+- (void)exportDidFinish:(AVAssetExportSession*)session {
     
     if (session.status == AVAssetExportSessionStatusCompleted) {
         NSURL *outputURL = session.outputURL;
